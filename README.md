@@ -5,6 +5,8 @@ A PyTorch implementation of various semi-supervised learning approaches for imag
 - SimCLR contrastive learning
 - Standard supervised learning
 
+The purpose of this repository is to develop a modular framework for benchmarking and comparing common techniques on image classification tasks. Key features are: multiple SSL approaches in one codebase, standardized evaluations, configurable architecture and hyperparameters, and detailed logging and visualization.
+
 ## Project Structure
 
 ```
@@ -18,25 +20,18 @@ A PyTorch implementation of various semi-supervised learning approaches for imag
 │   ├── semi_supervised_base.py           # Base trainer class
 │   ├── kmeans_consistency_trainer.py     # K-means with consistency
 │   └── simclr_trainer.py                 # SimCLR implementation
-├── checkpoints/                          # Saved model checkpoints
 └── main.py                               # Training entry point
-```
-
-## Installation
-
-```bash
-pip install torch torchvision numpy scikit-learn tqdm optuna matplotlib
 ```
 
 ## Model Architecture
 
 The CNN architecture consists of:
 
-2 convolutional layers with ReLU activation and max pooling
-Bottleneck linear layer (128 dimensions)
-Optional dropout layer
-Classification layer (10 classes)
-Optional projection head for contrastive learning
+- 2 convolutional layers with ReLU activation and max pooling
+- Linear layer
+- Optional dropout layer
+- Classification head
+- Optional projection head for contrastive learning
 
 ## Training Approaches
 
@@ -53,21 +48,28 @@ SimCLR Training:
 The code currently supports:
  - MNIST (default)
  - CIFAR10
+
 Data is automatically downloaded and split into labeled/unlabeled sets.
 
 ## Development
  - Python 3.6+
  - PyTorch 1.7+
+
 CUDA support recommended
 
-## Usage
+## Installation and Usage
+
+```bash
+pip install torch torchvision numpy scikit-learn tqdm optuna matplotlib
+```
+
 ```python
 from models.cnn import CNN
-from trainers.kmeans import KMeansTrainer
-from datasets.mnist import get_loaders
+from trainers.kmeans import SimCLRTrainer
+from datasets.mnist import get_mnist_loaders
 
 train_loader, _ = get_mnist_loaders()
 model = CNN()
-trainer = KMeansTrainer(model)
+trainer = SimCLRTrainer(model)
 trainer.train(train_loader)
 ```
