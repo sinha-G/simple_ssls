@@ -1,0 +1,36 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Model checkpoints
+checkpoints/
+*.pt
+
+# Data directories
+data/
+MNIST/
+
+# Dataset files
+*.ubyte
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Generated visualizations
+tsne_images/
+*.gif
+
+# PyTorch specific
+*.pth
+
+# Environment specific
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE specific
+.vscode/
+.idea/
