@@ -18,10 +18,12 @@ simclr_transform = transforms.Compose([
 ])
 
 class SimCLRTrainer:
-    def __init__(self, model, optimizer = None, temperature=0.5, checkpoint_dir='checkpoints'):
+    def __init__(self, model, lr_simclr = 0.003, lr_finetune = 0.002, optimizer = None, temperature=0.5, checkpoint_dir='checkpoints'):
         self.model = model
-        self.lr = 0.003
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=1e-5) if optimizer is None else optimizer
+        self.lr_simclr = lr_simclr
+        self.lr_finetune = lr_finetune
+        self.optimizer_simclr = optim.Adam(self.model.parameters(), lr=self.lr_simclr, weight_decay=1e-5) if optimizer is None else optimizer
+        self.optimizer_finetune = optim.Adam(self.model.parameters(), lr=self.lr_finetune)
         self.temperature = temperature
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(exist_ok=True)
@@ -33,7 +35,6 @@ class SimCLRTrainer:
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
             'loss': loss,
             'temperature': self.temperature,
             'best_loss': self.best_loss
@@ -87,7 +88,7 @@ class SimCLRTrainer:
         test_accs = []
         
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, 
+            self.optimizer_simclr, 
             T_max=epochs
         )
 
@@ -104,11 +105,11 @@ class SimCLRTrainer:
                 x = torch.cat([x, x], dim=0)
                 x = x.to(self.device)
 
-                self.optimizer.zero_grad()
+                self.optimizer_simclr.zero_grad()
                 logits, _, projections = self.model(x)
                 loss = self.contrastive_loss(projections)
                 loss.backward()
-                self.optimizer.step()
+                self.optimizer_simclr.step()
 
                 total_loss += loss.item()
 
@@ -130,11 +131,10 @@ class SimCLRTrainer:
 
         return train_accs, test_accs
 
-    def fine_tune(self, train_loader, test_loader, epochs=5, evaluate_every=1):
+    def fine_tune(self, train_loader, test_loader, lr = 0.001, epochs=5, evaluate_every=1):
         train_accs = []
         test_accs = []
         
-        optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         criterion = torch.nn.CrossEntropyLoss()
 
         for epoch in range(epochs):
@@ -144,13 +144,13 @@ class SimCLRTrainer:
             total = 0
 
             for images, labels in train_loader:
-                images, labels = images.to(self.device), labels.to(self.device)
+                images, labels, self.model = images.to(self.device), labels.to(self.device), self.model.to(self.device)
 
-                optimizer.zero_grad()
+                self.optimizer_finetune.zero_grad()
                 logits, _, _ = self.model(images)
                 loss = criterion(logits, labels)
                 loss.backward()
-                optimizer.step()
+                self.optimizer_finetune.step()
 
                 total_loss += loss.item()
                 predictions = torch.argmax(logits, dim=1)

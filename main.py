@@ -14,13 +14,13 @@ def main():
     train_loader, test_loader = get_mnist_loaders(batch_size=128)
     
     # Split the dataset into two parts
-    M = 100
+    M = 20
     split = [1 - M, M] if M < 1 else [len(train_loader.dataset) - M, M]
     simclr_dataset, finetune_dataset = random_split(train_loader.dataset, split)
 
     # Create data loaders for each subset
-    simclr_loader = DataLoader(simclr_dataset, batch_size=1024, shuffle=True, num_workers=0)
-    finetune_loader = DataLoader(finetune_dataset, batch_size=512, shuffle=True, num_workers=0)
+    simclr_loader = DataLoader(simclr_dataset, batch_size=2048, shuffle=True, num_workers=0)
+    finetune_loader = DataLoader(finetune_dataset, batch_size=1024, shuffle=True, num_workers=0)
     
     # Initialize SimCLR trainer 
     simclr_trainer = SimCLRTrainer(model)
@@ -29,7 +29,7 @@ def main():
     print("Pretraining model with SimCLR...")
     simclr_trainer.train(
         train_loader=simclr_loader, 
-        epochs=50
+        epochs=100
     )
 
     # Fine-tune model on labeled MNIST data
@@ -38,7 +38,8 @@ def main():
         train_loader=finetune_loader,
         test_loader=test_loader,
         epochs=10,
-        evaluate_every=1
+        evaluate_every=1,
+        lr = 0.002
     )
 
     # Initialize a second model (no SimCLR pretraining)
