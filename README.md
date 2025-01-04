@@ -1,11 +1,9 @@
 # Semi-Supervised Image Classification
 
-A PyTorch implementation of various semi-supervised learning approaches for image classification, including:
+The purpose of this repository is to develop a modular framework for benchmarking and comparing common techniques and architectures for semi-supervised image classification. Key features are: multiple SSL approaches in one codebase, standardized evaluations, configurable architecture and hyperparameters, and detailed logging and visualizations.
 - K-means clustering with consistency regularization
 - SimCLR contrastive learning
 - Standard supervised learning
-
-The purpose of this repository is to develop a modular framework for benchmarking and comparing common techniques on image classification tasks. Key features are: multiple SSL approaches in one codebase, standardized evaluations, configurable architecture and hyperparameters, and detailed logging and visualization.
 
 ## Project Structure
 
@@ -32,6 +30,8 @@ The CNN architecture consists of:
 - Optional dropout layer
 - Classification head
 - Optional projection head for contrastive learning
+
+The ViT architecture allows for a variable patch size, input size (C, H, W), hidden dimension, number of attention heads, number of ViT blocks, and output dimension.
 
 ## Training Approaches
 
