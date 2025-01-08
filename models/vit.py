@@ -75,14 +75,14 @@ class ViTBlock(nn.Module):
         return out + self.mlp(self.norm2(out))
 
 class ViT(nn.Module):
-    def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, out_d):
+    def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, num_classes):
         super(ViT, self).__init__()
         self.chw = chw  # (C, H, W)
         self.n_patches = n_patches
         self.n_blocks = n_blocks
         self.hidden_d = hidden_d
         self.n_heads = n_heads
-        self.out_d = out_d
+        self.num_classes = num_classes
 
         if chw[1] != chw[2]:
             raise ValueError('Input images must be square.')
@@ -107,7 +107,7 @@ class ViT(nn.Module):
 
         # MLP Head for classification
         self.mlp = nn.Sequential(
-            nn.Linear(self.hidden_d, out_d),
+            nn.Linear(self.hidden_d, num_classes),
             nn.Softmax(dim = -1)
         )
 
@@ -176,7 +176,7 @@ def main():
 
     # Model initializaiton and training options
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = ViT((1, 28, 28), n_patches=7, n_blocks=4, hidden_d=32, n_heads=4, out_d=10).to(device)
+    model = ViT((1, 28, 28), n_patches=7, n_blocks=6, hidden_d=32, n_heads=8, out_d=10).to(device)
     # Model initialization and training options
     epochs = 100
     lr = 1e-2

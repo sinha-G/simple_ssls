@@ -2,9 +2,10 @@
 import torch.nn as nn
 
 class CNN(nn.Module):
-    def __init__(self, input_channels=1, use_dropout=False, dropout_rate=0.5, use_projection_head=False):
+    def __init__(self, input_channels=1, use_dropout=False, dropout_rate=0.5, use_projection_head=False, num_classes=10):
         super(CNN, self).__init__()
         self.use_projection_head = use_projection_head
+        self.num_classes = num_classes
         self.features = nn.Sequential(
             nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
@@ -15,7 +16,7 @@ class CNN(nn.Module):
         )
         self.bottleneck = nn.LazyLinear(128)
         self.dropout = nn.Dropout(dropout_rate) if use_dropout else nn.Identity()
-        self.classifier = nn.Linear(128, 10)
+        self.classifier = nn.Linear(128, self.num_classes)
 
         if self.use_projection_head:
             self.projection_head = nn.Sequential(
@@ -26,7 +27,7 @@ class CNN(nn.Module):
 
     def forward(self, x):
         x = self.features(x)
-        x = x.view(x.size(0), -1)
+        x = x.reshape(x.size(0), -1)
         # print(f"[DEBUG]: Shape before bottleneck: {x.shape}")  # Debug print
         z = self.bottleneck(x)
         if self.training:
