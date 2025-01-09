@@ -2,7 +2,7 @@ import os
 import torch
 from models import CNN, ViT
 from trainers import SimCLRTrainer, DINOTrainer
-from datasets import get_mnist_loaders, get_cifar10_loaders
+from datasets import get_mnist_loaders, get_cifar10_loaders, get_imagenet_loaders
 from torch.utils.data import random_split, DataLoader
 
 def main():
@@ -15,34 +15,34 @@ def main():
     #     input_channels=3
     # )
     model = ViT(
-        chw = (3, 32, 32),
-        n_patches = 8,
+        chw = (3, 224, 224),
+        n_patches = 14,
         n_blocks = 6,
         hidden_d = 256,
         n_heads = 8,
-        num_classes = 10,
+        num_classes = 1000,
         dropout = 0.1
     )
     model = model.to('cuda')
 
     # Get data loaders
-    train_loader, test_loader = get_cifar10_loaders(batch_size=256)
+    train_loader, test_loader = get_imagenet_loaders(batch_size=128)
     
     # Split the dataset into two parts
-    M = 0.9   # Proportion of data to use for pretraining
+    M = 0.5   # Proportion of data to use for pretraining
     split = [M, 1 - M] if M < 1 else [len(train_loader.dataset) - M, M]
     pretrain_dataset, finetune_dataset = random_split(train_loader.dataset, split)
 
     # Create data loaders for each subset
     pretrain_loader = DataLoader(
         pretrain_dataset, 
-        batch_size=256, 
+        batch_size=128, 
         shuffle=True, 
         num_workers=0
     )
     finetune_loader = DataLoader(
         finetune_dataset,
-        batch_size=256,
+        batch_size=128,
         shuffle=True,
         num_workers=0
     )
@@ -63,7 +63,7 @@ def main():
     dino_trainer.train(
         train_loader=pretrain_loader,
         test_loader=test_loader,
-        epochs=10,
+        epochs=1,
     )
 
     # Finetune DINO model
@@ -79,12 +79,12 @@ def main():
 
     # Initialize supervised baseline
     baseline_model = ViT(
-        chw = (3, 32, 32),
-        n_patches = 8,
+        chw = (3, 224, 224),
+        n_patches = 14,
         n_blocks = 6,
         hidden_d = 256,
         n_heads = 8,
-        num_classes = 10,
+        num_classes = 1000,
         dropout = 0.1
     )
     baseline_trainer = DINOTrainer(baseline_model)

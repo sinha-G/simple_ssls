@@ -27,7 +27,7 @@ class TensorSolarization:
 
 # Global views transformations for tensors
 global_transform = transforms.Compose([
-    transforms.RandomResizedCrop(size=32, scale=(0.5, 1.0)),
+    transforms.RandomResizedCrop(size=224, scale=(0.5, 1.0)),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.ColorJitter(0.8, 0.8, 0.8, 0.2),
     transforms.RandomGrayscale(p=0.2),
@@ -37,7 +37,7 @@ global_transform = transforms.Compose([
 
 # Local views transformations for tensors
 local_transform = transforms.Compose([
-    transforms.RandomResizedCrop(size=32, scale=(0.2, 0.4)),
+    transforms.RandomResizedCrop(size=224, scale=(0.2, 0.4)),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.ColorJitter(0.8, 0.8, 0.8, 0.2),
     transforms.RandomGrayscale(p=0.2),
