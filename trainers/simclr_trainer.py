@@ -1,6 +1,7 @@
 # trainers/simclr_trainer.py
 import torch
 import torch.optim as optim
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 # import matplotlib.pyplot as plt
@@ -11,10 +12,10 @@ from .semi_supervised_base import SemiSupervisedTrainer
 
 # Define SimCLR augmentations
 simclr_transform = transforms.Compose([
-    transforms.RandomResizedCrop(size=28, scale = (0.5, 1.0)),
+    transforms.RandomResizedCrop(size=32, scale = (0.5, 1.0)),
     transforms.RandomRotation(degrees=45),
     transforms.GaussianBlur(kernel_size=3),
-    transforms.Normalize((0.5,), (0.5,))
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
 
 class SimCLRTrainer:
@@ -30,6 +31,7 @@ class SimCLRTrainer:
         self.best_loss = float('inf')
         self.start_epoch = 0
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.criterion = nn.CrossEntropyLoss()
         
     def save_checkpoint(self, epoch, loss, is_best=False):
         checkpoint = {
@@ -131,11 +133,21 @@ class SimCLRTrainer:
 
         return train_accs, test_accs
 
-    def fine_tune(self, train_loader, test_loader, lr = 0.001, epochs=5, evaluate_every=1):
+    def fine_tune(self, train_loader, test_loader, lr=0.001, epochs=25, evaluate_every=1, patience=20, scheduler_patience=10):
         train_accs = []
         test_accs = []
-        
+        best_loss = float('inf')
+        best_acc = 0
+        patience_counter = 0
         criterion = torch.nn.CrossEntropyLoss()
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer_finetune,
+            mode='min',
+            factor=0.5,
+            patience=scheduler_patience,
+            verbose=True
+        )
+        best_model_state = None
 
         for epoch in range(epochs):
             self.model.train()
@@ -144,8 +156,8 @@ class SimCLRTrainer:
             total = 0
 
             for images, labels in train_loader:
-                images, labels, self.model = images.to(self.device), labels.to(self.device), self.model.to(self.device)
-
+                images, labels = images.to(self.device), labels.to(self.device)
+                
                 self.optimizer_finetune.zero_grad()
                 logits, _, _ = self.model(images)
                 loss = criterion(logits, labels)
@@ -157,24 +169,51 @@ class SimCLRTrainer:
                 correct += (predictions == labels).sum().item()
                 total += labels.size(0)
 
+            avg_loss = total_loss/len(train_loader)
             train_acc = 100 * correct / total
             train_accs.append(train_acc)
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+            
+            # Evaluate and check for early stopping
             if (epoch + 1) % evaluate_every == 0 or epoch == 0:
-                test_accuracy, _, _ = self.evaluate(test_loader)
+                test_accuracy, _, _, val_loss = self.evaluate(test_loader)
                 test_accs.append(test_accuracy)
+                
+                scheduler.step(val_loss)
+
+                if test_accuracy > best_acc:
+                    best_acc = test_accuracy
+                    best_model_state = self.model.state_dict()
+                    
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print("Early stopping triggered")
+                        break
             else:
                 test_accs.append(test_accs[-1])
 
-            print(f"{timestamp} Epoch [{epoch+1}/{epochs}], Loss: {total_loss/len(train_loader):.4f}, Train Accuracy: {train_acc:.2f}%, Test Accuracy: {test_accs[-1]:.2f}%")
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{timestamp} Epoch [{epoch+1}/{epochs}], "
+                f"LR: {scheduler.get_last_lr()[0]:.6f}, "
+                f"Loss: {avg_loss:.4f}, "
+                f"Train Accuracy: {train_acc:.2f}%, "
+                f"Test Loss: {val_loss:.4f}, "
+                f"Test Accuracy: {test_accs[-1]:.2f}%")
 
-        return train_accs, test_accs
+        # Restore best model
+        if best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
+            
+        return train_accs, test_accs, best_acc
 
     def evaluate(self, data_loader):
         self.model.eval()
         correct = 0
         total = 0
+        val_loss = 0
         all_preds = []
         all_labels = []
 
@@ -182,15 +221,14 @@ class SimCLRTrainer:
             for images, labels in data_loader:
                 images, labels = images.to(self.device), labels.to(self.device)
                 logits, _, _ = self.model(images)
+                loss = self.criterion(logits, labels)
+                val_loss += loss.item()
                 predictions = torch.argmax(logits, dim=1)
-
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
                 all_preds.extend(predictions.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
 
-                correct += (predictions == labels).sum().item()
-                total += labels.size(0)
-
         accuracy = 100 * correct / total
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Accuracy: {accuracy:.2f}%")
-        return accuracy, np.array(all_preds), np.array(all_labels)
+        avg_val_loss = val_loss / len(data_loader)
+        return accuracy, all_preds, all_labels, avg_val_loss

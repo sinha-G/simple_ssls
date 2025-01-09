@@ -1,21 +1,10 @@
-import numpy as np
-import math
-
-from tqdm import tqdm
-
-import os
-import sys
 import torch
 import torch.nn as nn
+import numpy as np
+
 from torch.optim import Adam
 from torch.nn import CrossEntropyLoss
 from torch.utils.data import DataLoader
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from datasets import get_mnist_loaders, get_cifar10_loaders
-
-from torchvision.transforms import ToTensor
-from torchvision.datasets import MNIST
 
 class MSA(nn.Module):
     def __init__(self, d, n_heads=2):
@@ -49,14 +38,14 @@ class MSA(nn.Module):
             v = self.W_v[head](head_input)
             
             # Compute attention scores
-            attention = self.softmax(torch.bmm(q, k.transpose(1, 2)) / math.sqrt(self.d_head))
+            attention = self.softmax(torch.bmm(q, k.transpose(1, 2)) / self.d_head ** 0.5)
             attention_output[:, :, head, :] = torch.bmm(attention, v)
             
         # Reshape back to original dimensions
         return attention_output.reshape(batch_size, seq_len, -1)
 
 class ViTBlock(nn.Module):
-    def __init__(self, hidden_d, n_heads, mlp_ratio=4):
+    def __init__(self, hidden_d, n_heads, mlp_ratio=4, dropout=0.1):
         super(ViTBlock, self).__init__()
         self.hidden_d = hidden_d
         self.n_heads = n_heads
@@ -67,15 +56,18 @@ class ViTBlock(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(hidden_d, hidden_d * mlp_ratio),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_d * mlp_ratio, hidden_d)
         )
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        out = x + self.msa(self.norm1(x))
-        return out + self.mlp(self.norm2(out))
+        out = x + self.dropout(self.msa(self.norm1(x)))
+        return out + self.dropout(self.mlp(self.norm2(out)))
 
 class ViT(nn.Module):
-    def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, out_d):
+    def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, out_d, 
+                 use_projection_head=False, dropout=0.1):
         super(ViT, self).__init__()
         self.chw = chw  # (C, H, W)
         self.n_patches = n_patches
@@ -83,6 +75,7 @@ class ViT(nn.Module):
         self.hidden_d = hidden_d
         self.n_heads = n_heads
         self.out_d = out_d
+        self.use_projection_head = use_projection_head
 
         if chw[1] != chw[2]:
             raise ValueError('Input images must be square.')
@@ -100,24 +93,35 @@ class ViT(nn.Module):
         # Positional Embeddings
         self.pos_embed = self.get_positional_embeddings(self.n_patches ** 2 + 1, self.hidden_d)
         self.pos_embed = nn.Parameter(self.pos_embed, requires_grad=False)
-        # self.pos_embed.requires_grad = False
+        
+        # Add dropout layer
+        self.dropout = nn.Dropout(dropout)
 
         # Transformer Encoder
-        self.blocks = nn.ModuleList([ViTBlock(self.hidden_d, self.n_heads) for _ in range(self.n_blocks)])
+        self.blocks = nn.ModuleList([
+            ViTBlock(self.hidden_d, self.n_heads, dropout=dropout) for _ in range(self.n_blocks)
+        ])
 
         # MLP Head for classification
         self.mlp = nn.Sequential(
-            nn.Linear(self.hidden_d, out_d),
-            nn.Softmax(dim = -1)
+            nn.Linear(self.hidden_d, out_d)
         )
+
+        if use_projection_head:
+            self.projection = nn.Sequential(
+                nn.Linear(hidden_d, hidden_d),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_d, hidden_d)
+            )
 
     def patchify(self, images, n_patches):
         n, c, h, w = images.shape
 
         if h != w:
-            raise ValueError('Input images must be square.')
+            raise ValueError(f'Input images must be square. Got: {h}x{w}')
         if h % n_patches != 0:
-            raise ValueError('Input image dimensions must be divisible by the number of patches.')
+            raise ValueError(f'Input image dimensions must be divisible by the number of patches. Got: {h}x{w} and {n_patches} patches.')
         
         patches = torch.zeros(n, n_patches ** 2, h * w * c  // n_patches ** 2)
         patch_size = h // n_patches
@@ -145,10 +149,12 @@ class ViT(nn.Module):
         device = images.device
         
         n, c, h, w = images.shape
+
+        # Patchify images
         patches = self.patchify(images, self.n_patches)
-        
-        # Move patches to correct device
         patches = patches.to(device)
+
+        # Embed patches 
         embeddings = self.embedding(patches)
         
         # Add class token and move to correct device
@@ -157,109 +163,23 @@ class ViT(nn.Module):
         
         # Add positional embeddings
         embeddings = embeddings + self.pos_embed.to(device)
+
+        # Apply dropout
+        embeddings = self.dropout(embeddings)
         
         # Pass through transformer blocks
         for block in self.blocks:
             embeddings = block(embeddings)
             
-        # Get class token output and classify
+        # Get class token output
         class_token_output = embeddings[:, 0]
-        return self.mlp(class_token_output)
 
-def main():
-    # This function is just for testing the above implementation of the Vision Transformer.
-    # It is not a part of the implementation of the Vision Transformer.
-    
-    # Loading data
-    train_loader, test_loader = get_mnist_loaders(batch_size=1024)
-    # train_loader, test_loader = get_cifar10_loaders(batch_size=1024)
-
-    # Model initializaiton and training options
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = ViT((1, 28, 28), n_patches=7, n_blocks=4, hidden_d=32, n_heads=4, out_d=10).to(device)
-    # Model initialization and training options
-    epochs = 100
-    lr = 1e-2
-    lr_scheduler_patience = 5  # Shorter patience for LR scheduling
-    early_stopping_patience = 15  # Longer patience for early stopping
-    min_lr = 1e-5
-
-    optimizer = Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5, 
-        patience=lr_scheduler_patience,  # Use shorter patience here
-        min_lr=min_lr
-    )
-    criterion = CrossEntropyLoss()
-
-    # Early stopping variables
-    best_val_loss = float('inf')
-    best_val_accuracy = 0.0
-    patience_counter = 0
-    best_model_state = None
-
-    # Training
-    for epoch in range(epochs):
-        # Training loop
-        model.train()
-        train_loss = 0.0
-        for batch in train_loader:
-            images, labels = batch
-            images, labels = images.to(device), labels.to(device)
-            
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-            
-        # Validation loop
-        model.eval()
-        val_correct = 0
-        val_total = 0
-        val_loss = 0.0
-        with torch.no_grad():
-            for batch in test_loader:
-                images, labels = batch
-                images, labels = images.to(device), labels.to(device)
-                outputs = model(images)
-                val_loss += criterion(outputs, labels).item()
+        # Map class token to logits
+        logits = self.mlp(class_token_output)
         
-                predictions = torch.argmax(outputs, dim=1)
-                val_correct += (predictions == labels).sum().item()
-                val_total += labels.shape[0]
+        # Optional projection head for SimCLR
+        if self.use_projection_head:
+            projection = self.projection(class_token_output)
+            return logits, class_token_output, projection
 
-        # Average losses
-        train_loss /= len(train_loader)
-        val_loss /= len(test_loader)
-        val_accuracy = val_correct / val_total
-        
-        # Learning rate scheduling
-        scheduler.step(val_loss)
-        
-        # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_val_accuracy = val_accuracy
-            patience_counter = 0
-            best_model_state = model.state_dict()
-        else:
-            patience_counter += 1
-            
-        print(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, '
-              f'Val Acc: {val_accuracy:.4f}, LR: {optimizer.param_groups[0]["lr"]:.6f}')
-
-        if patience_counter >= early_stopping_patience:
-            print(f'Early stopping triggered! Best validation accuracy: {best_val_accuracy:.4f}')
-            model.load_state_dict(best_model_state)
-            break
-        
-        if optimizer.param_groups[0]['lr'] <= min_lr:
-            print('Learning rate too small, stopping training')
-            break
-
-if __name__ == '__main__':
-    main()
+        return logits, class_token_output
