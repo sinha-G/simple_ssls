@@ -52,7 +52,8 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
                  temp_student=0.1,
                  temp_teacher=0.04,
                  n_local_views=6,
-                 weight_decay=0.04):
+                 weight_decay=0.04,
+                 patience=10):
         super().__init__()
         SemiSupervisedTrainer.__init__(self, model)
         
@@ -82,7 +83,9 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         self.momentum_teacher = momentum_teacher
         self.temp_student = temp_student
         self.temp_teacher = temp_teacher
-        
+        self.patience = patience
+        self.best_loss = float('inf')
+
         # Initialize center for loss computation
         self.register_buffer("center", torch.zeros(1, model.num_classes))
 
@@ -90,9 +93,9 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         images = images.to(self.device)
         
         # Check for NaN inputs
-        if torch.isnan(images).any():
-            print("NaN detected in input images")
-            return None
+        # if torch.isnan(images).any():
+        #     print("NaN detected in input images")
+        #     return None
             
         # Forward passes
         with torch.no_grad():
@@ -101,19 +104,28 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         student_output = student_outputs[0]  # Get logits output
         
         # Check outputs before loss
-        if torch.isnan(student_output).any():
-            print(f"NaN in student output. Max: {student_output.max()}, Min: {student_output.min()}")
-            return None
+        # if torch.isnan(student_output).any():
+        #     print(f"NaN in student output. Max: {student_output.max()}, Min: {student_output.min()}")
+        #     return None
             
         loss = self.dino_loss(teacher_output, student_output)
         
-        if torch.isnan(loss):
-            print("NaN loss detected")
-            return None
+        # if torch.isnan(loss):
+        #     print("NaN loss detected")
+        #     return None
         
         return loss
 
-    def train(self, train_loader, test_loader, epochs=100, evaluate_every=5):
+    def train(self, train_loader, test_loader, epochs=100):
+        history = {
+            'train_loss': [],
+            'lr': []
+        }
+        patience_counter = 0
+        best_model_state = None
+        max_grad_norm = 1.0
+        
+        # try:
         for epoch in range(epochs):
             self.student.train()
             total_loss = 0
@@ -121,24 +133,64 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
             
             for batch_idx, (images, _) in enumerate(train_loader):
                 self.optimizer.zero_grad()
-                
+                # try:
                 loss = self.train_step(images)
+            
                 if loss is not None:
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.student.parameters(), 
+                        max_grad_norm
+                    )
                     self.optimizer.step()
                     self.update_teacher()
+                    # torch.cuda.synchronize()
                     total_loss += loss.item()
                     valid_batches += 1
-                
+                    # del loss
+                    # torch.cuda.empty_cache()
+
+                # except RuntimeError as e:
+                #     print(f"Runtime error: {e}")
+                #     continue
+            
             if valid_batches > 0:
                 avg_loss = total_loss / valid_batches
-                print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+                history['train_loss'].append(avg_loss)
+                history['lr'].append(self.scheduler.get_last_lr()[0])
+                
+                # Early stopping
+                if avg_loss < self.best_loss:
+                    self.best_loss = avg_loss
+                    patience_counter = 0
+                    best_model_state = self.student.state_dict()
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.patience:
+                        print(f"Early stopping triggered at epoch {epoch+1}")
+                        break
+
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"{timestamp} Epoch [{epoch+1}/{epochs}], "
+                    f"Loss: {avg_loss:.6f}, "
+                    f"LR: {self.scheduler.get_last_lr()[0]:.6f}, "
+                    f"Patience: {patience_counter}/{self.patience}")
+
                 self.scheduler.step()
-            
-            # Early stopping on NaN
+                
             if valid_batches == 0:
                 print("Training failed - too many NaN values")
                 break
+        
+        if best_model_state is not None:
+            self.student.load_state_dict(best_model_state)
+
+        # except Exception as e:
+            # print(f"Training error: {str(e)}")
+            # if best_model_state is not None:
+            #     self.student.load_state_dict(best_model_state)
+
+        return history
 
     @torch.no_grad()
     def update_teacher(self):
@@ -154,14 +206,14 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
             self.center = self.momentum_center * self.center + (1 - self.momentum_center) * batch_center
 
     def dino_loss(self, teacher_output, student_output):
-        print(f"\nDebug Loss Computation:")
-        print(f"\nStudent output magnitude: {torch.norm(student_output)}")
-        print(f"Student output max/min: {student_output.max()}/{student_output.min()}")
-        print(f"Teacher output shape: {teacher_output.shape}")
-        print(f"Student output shape: {student_output.shape}")
-        print(f"Contains NaN - Teacher: {torch.isnan(teacher_output).any()}, Student: {torch.isnan(student_output).any()}")
-        if torch.norm(student_output) > 1e3:
-            print("WARNING: Large student output detected!")
+        # print(f"\nDebug Loss Computation:")
+        # print(f"\nStudent output magnitude: {torch.norm(student_output)}")
+        # print(f"Student output max/min: {student_output.max()}/{student_output.min()}")
+        # print(f"Teacher output shape: {teacher_output.shape}")
+        # print(f"Student output shape: {student_output.shape}")
+        # print(f"Contains NaN - Teacher: {torch.isnan(teacher_output).any()}, Student: {torch.isnan(student_output).any()}")
+        # if torch.norm(student_output) > 1e3:
+        #     print("WARNING: Large student output detected!")
 
         teacher_output = teacher_output.detach()
 
@@ -172,25 +224,101 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         # Normalize outputs
         teacher_output = F.normalize(teacher_output, dim=-1, p=2)
         student_output = F.normalize(student_output, dim=-1, p=2)
-        print(f"After norm - Contains NaN - Teacher: {torch.isnan(teacher_output).any()}, Student: {torch.isnan(student_output).any()}")
+        # print(f"After norm - Contains NaN - Teacher: {torch.isnan(teacher_output).any()}, Student: {torch.isnan(student_output).any()}")
         
         # Temperature scaling
         teacher_out = F.softmax(teacher_output/self.temp_teacher, dim=-1)
         student_out = F.softmax(student_output/self.temp_student, dim=-1)
-        print(f"After softmax - Contains NaN - Teacher: {torch.isnan(teacher_out).any()}, Student: {torch.isnan(student_out).any()}")
+        # print(f"After softmax - Contains NaN - Teacher: {torch.isnan(teacher_out).any()}, Student: {torch.isnan(student_out).any()}")
         
         eps = 1e-7
         student_out = student_out + eps
         
         loss = -torch.mean(torch.sum(teacher_out * torch.log(student_out), dim=-1))
-        print(f"Final loss: {loss.item()}")
+        # print(f"Final loss: {loss.item()}")
         
-        if torch.isnan(loss):
-            print("WARNING: Loss is NaN!")
-            print(f"Teacher range: [{teacher_out.min()}, {teacher_out.max()}]")
-            print(f"Student range: [{student_out.min()}, {student_out.max()}]")
+        # if torch.isnan(loss):
+        #     print("WARNING: Loss is NaN!")
+        #     print(f"Teacher range: [{teacher_out.min()}, {teacher_out.max()}]")
+        #     print(f"Student range: [{student_out.min()}, {student_out.max()}]")
         
         return loss
+
+    def finetune(self, train_loader, test_loader, epochs=100, lr=0.0001, patience=10, evaluate_every=1):
+        # Setup for finetuning
+        self.student.train()
+        optimizer = torch.optim.Adam(self.student.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        criterion = torch.nn.CrossEntropyLoss()
+        
+        history = {
+            'train_loss': [],
+            'train_acc': [],
+            'test_acc': [],
+            'lr': []
+        }
+        
+        best_acc = 0
+        best_model_state = None
+        patience_counter = 0
+        
+        # try:
+        for epoch in range(epochs):
+            # Training
+            self.student.train()
+            total_loss = 0
+            correct = 0
+            total = 0
+            
+            for images, labels in train_loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                
+                optimizer.zero_grad()
+                logits = self.student(images)[0]  # Get classification output
+                loss = criterion(logits, labels)
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+                _, predicted = logits.max(1)
+                total += labels.size(0)
+                correct += predicted.eq(labels).sum().item()
+            
+            avg_loss = total_loss / len(train_loader)
+            train_acc = 100. * correct / total
+            
+            # Evaluate
+            if (epoch + 1) % evaluate_every == 0:
+                test_acc, _, _, val_loss = self.evaluate(test_loader)
+                scheduler.step(val_loss)
+                
+                if test_acc > best_acc:
+                    best_acc = test_acc
+                    best_model_state = self.student.state_dict()
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print("Early stopping triggered")
+                        break
+                
+                print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}, "
+                    f"Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%")
+            
+            # Update history
+            history['train_loss'].append(avg_loss)
+            history['train_acc'].append(train_acc)
+            history['test_acc'].append(test_acc if 'test_acc' in locals() else 0)
+            history['lr'].append(optimizer.param_groups[0]['lr'])
+        
+        # except Exception as e:
+            # print(f"Training error: {str(e)}")
+        
+        # Restore best model
+        if best_model_state is not None:
+            self.student.load_state_dict(best_model_state)
+        
+        return history
 
     @torch.no_grad()
     def evaluate(self, test_loader):
@@ -199,6 +327,8 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         total = 0
         class_correct = [0 for _ in range(10)]
         class_total = [0 for _ in range(10)]
+        val_loss = 0
+        criterion = torch.nn.CrossEntropyLoss()
         
         for images, labels in test_loader:
             images = images.to(self.device)
@@ -206,6 +336,8 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
             
             # Modified line: Only unpack the first return value
             logits, *_ = self.student(images)
+            loss = criterion(logits, labels)
+            val_loss += loss.item()
             
             _, predicted = torch.max(logits.data, 1)
             total += labels.size(0)
@@ -220,6 +352,7 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         
         accuracy = 100 * correct / total
         per_class_acc = [100 * class_correct[i] / class_total[i] if class_total[i] > 0 else 0 for i in range(10)]
-        
+        avg_val_loss = val_loss / len(test_loader)
+
         self.student.train()
-        return accuracy, class_correct, class_total
+        return accuracy, class_correct, class_total, avg_val_loss

@@ -66,7 +66,7 @@ class ViTBlock(nn.Module):
         return out + self.dropout(self.mlp(self.norm2(out)))
 
 class ViT(nn.Module):
-    def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, out_d, 
+    def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, num_classes, 
                  use_projection_head=False, dropout=0.1):
         super(ViT, self).__init__()
         self.chw = chw  # (C, H, W)
@@ -74,7 +74,7 @@ class ViT(nn.Module):
         self.n_blocks = n_blocks
         self.hidden_d = hidden_d
         self.n_heads = n_heads
-        self.out_d = out_d
+        self.num_classes = num_classes
         self.use_projection_head = use_projection_head
 
         if chw[1] != chw[2]:
@@ -104,7 +104,7 @@ class ViT(nn.Module):
 
         # MLP Head for classification
         self.mlp = nn.Sequential(
-            nn.Linear(self.hidden_d, out_d)
+            nn.Linear(self.hidden_d, num_classes)
         )
 
         if use_projection_head:

@@ -1,26 +1,36 @@
-# main.py
+import os
 import torch
-from models import CNN
+from models import CNN, ViT
 from trainers import SimCLRTrainer, DINOTrainer
 from datasets import get_mnist_loaders, get_cifar10_loaders
 from torch.utils.data import random_split, DataLoader
 
 def main():
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
     # Initialize model and set M
-    model = CNN(
-        use_dropout=True, 
-        dropout_rate=0.3, 
-        use_projection_head=True,
-        input_channels=3
+    # model = CNN(
+    #     use_dropout=True, 
+    #     dropout_rate=0.3, 
+    #     use_projection_head=True,
+    #     input_channels=3
+    # )
+    model = ViT(
+        chw = (3, 32, 32),
+        n_patches = 8,
+        n_blocks = 6,
+        hidden_d = 256,
+        n_heads = 8,
+        num_classes = 10,
+        dropout = 0.1
     )
     model = model.to('cuda')
 
     # Get data loaders
-    train_loader, test_loader = get_cifar10_loaders(batch_size=128)
+    train_loader, test_loader = get_cifar10_loaders(batch_size=256)
     
     # Split the dataset into two parts
-    M = 100
-    split = [1 - M, M] if M < 1 else [len(train_loader.dataset) - M, M]
+    M = 0.9   # Proportion of data to use for pretraining
+    split = [M, 1 - M] if M < 1 else [len(train_loader.dataset) - M, M]
     pretrain_dataset, finetune_dataset = random_split(train_loader.dataset, split)
 
     # Create data loaders for each subset
@@ -50,30 +60,50 @@ def main():
 
     # Train with DINO
     print("Training with DINO...")
-    train_losses, test_accs = dino_trainer.train(
+    dino_trainer.train(
         train_loader=pretrain_loader,
         test_loader=test_loader,
-        epochs=100,
+        epochs=10,
+    )
+
+    # Finetune DINO model
+    print("\nFinetuning DINO model...")
+    dino_history = dino_trainer.finetune(
+        train_loader=finetune_loader,
+        test_loader=test_loader,
+        epochs=10,
+        lr=0.0001,
+        patience=10,
         evaluate_every=1
     )
 
     # Initialize supervised baseline
-    baseline_model = CNN(use_dropout=True, dropout_rate=0.3, use_projection_head=True)
+    baseline_model = ViT(
+        chw = (3, 32, 32),
+        n_patches = 8,
+        n_blocks = 6,
+        hidden_d = 256,
+        n_heads = 8,
+        num_classes = 10,
+        dropout = 0.1
+    )
     baseline_trainer = DINOTrainer(baseline_model)
 
     # Train baseline directly on labeled data
     print("\nTraining baseline...")
-    baseline_losses, baseline_accs = baseline_trainer.train(
+    baseline_history = baseline_trainer.finetune(
         train_loader=finetune_loader,
         test_loader=test_loader,
-        epochs=100,
-        evaluate_every=5
+        epochs=10,
+        lr=0.0001,
+        patience=10,
+        evaluate_every=1
     )
 
     # Print final results
     print("\nFinal Results:")
-    print(f"DINO Test Accuracy: {test_accs[-1]:.2f}%")
-    print(f"Baseline Test Accuracy: {baseline_accs[-1]:.2f}%")
+    print(f"DINO Test Accuracy: {dino_history['train_acc']:.2f}%")
+    print(f"Baseline Test Accuracy: {baseline_history['train_acc']:.2f}%")
 
 if __name__ == '__main__':
     main()
