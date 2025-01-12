@@ -9,14 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from .semi_supervised_base import SemiSupervisedTrainer
 from copy import deepcopy
-
-# Define DINO augmentations
-class GaussianNoise:
-    def __init__(self, std=0.1):
-        self.std = std
-        
-    def __call__(self, x):
-        return x + torch.randn_like(x) * self.std
+from tqdm import tqdm
 
 class TensorSolarization:
     def __init__(self, threshold=0.5):
@@ -126,12 +119,13 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         max_grad_norm = 1.0
         
         # try:
-        for epoch in range(epochs):
+        for epoch in tqdm(range(epochs), desc='Epochs', position=0):
             self.student.train()
             total_loss = 0
             valid_batches = 0
             
-            for batch_idx, (images, _) in enumerate(train_loader):
+            pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}', position=1, leave=False)
+            for batch_idx, (images, _) in enumerate(pbar):
                 self.optimizer.zero_grad()
                 # try:
                 loss = self.train_step(images)
@@ -147,12 +141,8 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
                     # torch.cuda.synchronize()
                     total_loss += loss.item()
                     valid_batches += 1
-                    # del loss
-                    # torch.cuda.empty_cache()
-
-                # except RuntimeError as e:
-                #     print(f"Runtime error: {e}")
-                #     continue
+                    
+                    pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
             
             if valid_batches > 0:
                 avg_loss = total_loss / valid_batches
@@ -262,15 +252,21 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         best_model_state = None
         patience_counter = 0
         
-        # try:
-        for epoch in range(epochs):
+        # Add epoch progress bar
+        epoch_pbar = tqdm(range(epochs), desc='Epochs', position=0)
+        
+        for epoch in epoch_pbar:
             # Training
             self.student.train()
             total_loss = 0
             correct = 0
             total = 0
             
-            for images, labels in train_loader:
+            # Add batch progress bar
+            batch_pbar = tqdm(train_loader, desc=f'Training Epoch {epoch+1}', 
+                            leave=False, position=1)
+            
+            for images, labels in batch_pbar:
                 images, labels = images.to(self.device), labels.to(self.device)
                 
                 optimizer.zero_grad()
@@ -283,6 +279,9 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
                 _, predicted = logits.max(1)
                 total += labels.size(0)
                 correct += predicted.eq(labels).sum().item()
+                
+                # Update batch progress bar
+                batch_pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
             
             avg_loss = total_loss / len(train_loader)
             train_acc = 100. * correct / total
@@ -299,20 +298,21 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
                 else:
                     patience_counter += 1
                     if patience_counter >= patience:
-                        print("Early stopping triggered")
+                        print("\nEarly stopping triggered")
                         break
                 
-                print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}, "
-                    f"Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%")
+                # Update epoch progress bar
+                epoch_pbar.set_postfix({
+                    'Loss': f'{avg_loss:.4f}',
+                    'Train Acc': f'{train_acc:.2f}%',
+                    'Test Acc': f'{test_acc:.2f}%'
+                })
             
             # Update history
             history['train_loss'].append(avg_loss)
             history['train_acc'].append(train_acc)
             history['test_acc'].append(test_acc if 'test_acc' in locals() else 0)
             history['lr'].append(optimizer.param_groups[0]['lr'])
-        
-        # except Exception as e:
-            # print(f"Training error: {str(e)}")
         
         # Restore best model
         if best_model_state is not None:
@@ -325,8 +325,10 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         self.student.eval()
         correct = 0
         total = 0
-        class_correct = [0 for _ in range(10)]
-        class_total = [0 for _ in range(10)]
+
+        num_classes = self.student.num_classes
+        class_correct = [0 for _ in range(num_classes)]
+        class_total = [0 for _ in range(num_classes)]
         val_loss = 0
         criterion = torch.nn.CrossEntropyLoss()
         
@@ -346,12 +348,13 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
             # Per-class accuracy
             c = (predicted == labels).squeeze()
             for i in range(len(labels)):
-                label = labels[i]
-                class_correct[label] += c[i].item()
-                class_total[label] += 1
+                label = labels[i].item()
+                if 0 <= label < num_classes:  # Validate label is in range
+                    class_correct[label] += c[i].item()
+                    class_total[label] += 1
         
         accuracy = 100 * correct / total
-        per_class_acc = [100 * class_correct[i] / class_total[i] if class_total[i] > 0 else 0 for i in range(10)]
+        per_class_acc = [100 * class_correct[i] / class_total[i] if class_total[i] > 0 else 0 for i in range(num_classes)]
         avg_val_loss = val_loss / len(test_loader)
 
         self.student.train()

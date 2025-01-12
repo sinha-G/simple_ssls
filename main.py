@@ -26,10 +26,12 @@ def main():
     model = model.to('cuda')
 
     # Get data loaders
-    train_loader, test_loader = get_imagenet_loaders(batch_size=128)
+    print("Loading data...")
+    train_loader, test_loader = get_imagenet_loaders(batch_size=128, num_workers=8)
     
     # Split the dataset into two parts
-    M = 0.5   # Proportion of data to use for pretraining
+    print("Splitting dataset...")
+    M = 0.99   # Proportion of data to use for pretraining
     split = [M, 1 - M] if M < 1 else [len(train_loader.dataset) - M, M]
     pretrain_dataset, finetune_dataset = random_split(train_loader.dataset, split)
 
@@ -38,13 +40,13 @@ def main():
         pretrain_dataset, 
         batch_size=128, 
         shuffle=True, 
-        num_workers=0
+        num_workers=8
     )
     finetune_loader = DataLoader(
         finetune_dataset,
         batch_size=128,
         shuffle=True,
-        num_workers=0
+        num_workers=8
     )
     
     # Initialize DINO trainer
@@ -102,7 +104,7 @@ def main():
 
     # Print final results
     print("\nFinal Results:")
-    print(f"DINO Test Accuracy: {dino_history['train_acc']:.2f}%")
+    print(f"DINO Final Test Accuracy: {dino_history['train_acc'][-1]:.2f}%")
     print(f"Baseline Test Accuracy: {baseline_history['train_acc']:.2f}%")
 
 if __name__ == '__main__':
