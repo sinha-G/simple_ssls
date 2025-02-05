@@ -14,27 +14,27 @@ def get_imagenet_loaders(batch_size=128, num_workers=4):
     )
     
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(224),
+        transforms.RandomResizedCrop(128, scale = (0.16, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize,
     ])
     
     val_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
+        transforms.Resize(128),
+        # transforms.CenterCrop(224),
         transforms.ToTensor(),
         normalize,
     ])
 
     train_dataset = datasets.ImageNet(
-        'data/imagenet',
+        'data/imagenet/',
         split='train',
         transform=train_transform
     )
     
     val_dataset = datasets.ImageNet(
-        'data/imagenet', 
+        'data/imagenet/', 
         split='val',
         transform=val_transform
     )

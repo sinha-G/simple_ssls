@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from .semi_supervised_base import SemiSupervisedTrainer
 from copy import deepcopy
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 class TensorSolarization:
     def __init__(self, threshold=0.5):
@@ -17,25 +17,6 @@ class TensorSolarization:
         
     def __call__(self, x):
         return torch.where(x >= self.threshold, 1-x, x)
-
-# Global views transformations for tensors
-global_transform = transforms.Compose([
-    transforms.RandomResizedCrop(size=224, scale=(0.5, 1.0)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(0.8, 0.8, 0.8, 0.2),
-    transforms.RandomGrayscale(p=0.2),
-    lambda x: x + torch.randn_like(x) * 0.1 if torch.rand(1) < 0.5 else x,  # Gaussian noise
-    TensorSolarization(threshold=0.5),
-])
-
-# Local views transformations for tensors
-local_transform = transforms.Compose([
-    transforms.RandomResizedCrop(size=224, scale=(0.2, 0.4)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(0.8, 0.8, 0.8, 0.2),
-    transforms.RandomGrayscale(p=0.2),
-    lambda x: x + torch.randn_like(x) * 0.1 if torch.rand(1) < 0.5 else x,  # Gaussian noise
-])
 
 class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
     def __init__(self, model, 
