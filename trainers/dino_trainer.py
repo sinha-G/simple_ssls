@@ -4,12 +4,11 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 from torchvision import transforms
-from PIL import ImageOps
 from datetime import datetime
-from pathlib import Path
 from .semi_supervised_base import SemiSupervisedTrainer
 from copy import deepcopy
 from tqdm.auto import tqdm
+import random
 
 class TensorSolarization:
     def __init__(self, threshold=0.5):
@@ -215,7 +214,7 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         
         return loss
 
-    def finetune(self, train_loader, test_loader, epochs=100, lr=0.0001, patience=10, evaluate_every=1):
+    def finetune(self, train_loader, test_loader, epochs=100, lr=0.0001, patience=10, evaluate_every=1, visualize_every=1):
         # Setup for finetuning
         self.student.train()
         optimizer = torch.optim.Adam(self.student.parameters(), lr=lr)
@@ -235,8 +234,10 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         
         # Add epoch progress bar
         epoch_pbar = tqdm(range(epochs), desc='Epochs', position=0)
-        
+
         for epoch in epoch_pbar:
+            torch.cuda.empty_cache()
+
             # Training
             self.student.train()
             total_loss = 0
@@ -244,8 +245,7 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
             total = 0
             
             # Add batch progress bar
-            batch_pbar = tqdm(train_loader, desc=f'Training Epoch {epoch+1}', 
-                            leave=False, position=1)
+            batch_pbar = tqdm(train_loader, desc=f'Training Epoch {epoch+1}')#,leave=False, position=1)
             
             for images, labels in batch_pbar:
                 images, labels = images.to(self.device), labels.to(self.device)
@@ -288,6 +288,23 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
                     'Train Acc': f'{train_acc:.2f}%',
                     'Test Acc': f'{test_acc:.2f}%'
                 })
+
+            # Visualize attention every `visualize_every` epochs, if set
+            if visualize_every > 0 and (epoch + 1) % visualize_every == 0:
+                images, _ = next(iter(test_loader))
+                images = images.to(self.device)
+                random_idx = random.sample(range(images.size(0)), k=2)
+                
+
+                print(f"\nVisualizing attention at epoch {epoch+1}...")
+                for i in random_idx:  # Visualize a couple of images
+                    for layer in range(self.student.n_blocks):
+                        for head in range(min(self.student.n_heads, 2)):
+                            self.student.visualize_attention(
+                                images=images[i].unsqueeze(0),
+                                layer_idx=layer,
+                                head_idx=head
+                            )
             
             # Update history
             history['train_loss'].append(avg_loss)

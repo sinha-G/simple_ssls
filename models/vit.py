@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
+import math
+import json
 
 from torch.optim import Adam
 from torch.nn import CrossEntropyLoss
@@ -13,43 +15,50 @@ class MSA(nn.Module):
         self.d = d
         self.n_heads = n_heads
         self.d_head = d // n_heads
+
+        if  d % n_heads != 0:
+            raise ValueError(f"Embedding dimension {d} must be divisible by the number of heads {n_heads}.")
+
+        # Single linear layers for all heads combined.
+        self.q_proj = nn.Linear(d, d)
+        self.k_proj = nn.Linear(d, d)
+        self.v_proj = nn.Linear(d, d)
         
-        self.W_q = nn.ModuleList([nn.Linear(self.d_head, self.d_head) for _ in range(n_heads)])
-        self.W_k = nn.ModuleList([nn.Linear(self.d_head, self.d_head) for _ in range(n_heads)])
-        self.W_v = nn.ModuleList([nn.Linear(self.d_head, self.d_head) for _ in range(n_heads)])
+        self.out_proj = nn.Linear(d, d)
+        
         self.softmax = nn.Softmax(dim=-1)
         
         self.attention_weights = None
-    
+
     def forward(self, sequences):
-        # sequences shape: (batch_size, seq_len, hidden_dim)
-        device = sequences.device
+        # sequences shape: (batch_size, seq_len, d)
         batch_size, seq_len, _ = sequences.shape
         
-        # Split hidden dim into heads
-        sequences = sequences.reshape(batch_size, seq_len, self.n_heads, self.d_head)
+        # Compute Q, K, V for all heads at once.
+        q = self.q_proj(sequences)  # (batch_size, seq_len, d)
+        k = self.k_proj(sequences)
+        v = self.v_proj(sequences)
         
-        # Initialize output tensor
-        attention_output = torch.zeros_like(sequences).to(device)
+        # Reshape to (batch_size, seq_len, n_heads, d_head) and then transpose to (batch_size, n_heads, seq_len, d_head)
+        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
         
-        # Initialize attention weights storage
-        self.attention_weights = torch.zeros(batch_size, self.n_heads, seq_len, seq_len).to(device)
-
-        # Process each attention head
-        for head in range(self.n_heads):
-            head_input = sequences[:, :, head, :]  # (batch_size, seq_len, d_head)
-            
-            q = self.W_q[head](head_input)  # (batch_size, seq_len, d_head)
-            k = self.W_k[head](head_input)
-            v = self.W_v[head](head_input)
-            
-            # Compute attention scores
-            attention = self.softmax(torch.bmm(q, k.transpose(1, 2)) / self.d_head ** 0.5)
-            self.attention_weights[:, head] = attention
-            attention_output[:, :, head, :] = torch.bmm(attention, v)
-            
-        # Reshape back to original dimensions
-        return attention_output.reshape(batch_size, seq_len, -1)
+        # Compute scaled dot-product attention scores.
+        # scores shape: (batch_size, n_heads, seq_len, seq_len)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_head)
+        attn = self.softmax(scores)
+        self.attention_weights = attn.detach()  # save for inspection if needed
+        
+        # Multiply the attention weights by the values.
+        # out shape: (batch_size, n_heads, seq_len, d_head)
+        out = torch.matmul(attn, v)
+        
+        # Transpose and reshape back to (batch_size, seq_len, d)
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d)
+        
+        out = self.out_proj(out)
+        return out
 
 class ViTBlock(nn.Module):
     def __init__(self, hidden_d, n_heads, mlp_ratio=4, dropout=0.1):
@@ -73,8 +82,7 @@ class ViTBlock(nn.Module):
         return out + self.dropout(self.mlp(self.norm2(out)))
 
 class ViT(nn.Module):
-    def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, num_classes, 
-                 use_projection_head=False, dropout=0.1):
+    def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, num_classes, use_projection_head=False, dropout=0.1):
         super(ViT, self).__init__()
         self.chw = chw  # (C, H, W)
         self.n_patches = n_patches
@@ -148,11 +156,23 @@ class ViT(nn.Module):
         return patches
 
     def get_positional_embeddings(self, sequence_length, d):
-        result = torch.ones(sequence_length, d)
-        for i in range(sequence_length):
-            for j in range(d):
-                result[i][j] = np.sin(i / (10000 ** (j / d))) if j % 2 == 0 else np.cos(i / (10000 ** ((j - 1) / d)))
-        return result
+        # Create a tensor of positions (shape: [sequence_length, 1])
+        positions = torch.arange(sequence_length, dtype=torch.float32).unsqueeze(1)
+        
+        # Compute the div_term for even indices (shape: [d/2])
+        div_term = torch.exp(torch.arange(0, d, 2, dtype=torch.float32) * (-math.log(10000.0) / d))
+        
+        # Initialize the positional embeddings tensor (shape: [sequence_length, d])
+        pe = torch.zeros(sequence_length, d)
+        
+        # Apply sin to even indices in the array; 2i
+        pe[:, 0::2] = torch.sin(positions * div_term)
+        
+        # Apply cos to odd indices in the array; 2i+1
+        pe[:, 1::2] = torch.cos(positions * div_term)
+        
+        return pe
+
 
     def forward(self, images):
         # Get device from images
@@ -196,69 +216,59 @@ class ViT(nn.Module):
 
         return logits, class_token_output
     
-    def visualize_attention(self, images, layer_idx=0, head_idx=0, save_path=None):
-        """Visualize attention maps and model prediction"""
-        import matplotlib.pyplot as plt
+    def visualize_attention(self, images, layer_idx=0, head_idx=0, save_path=None, alpha=0.6, ax=None):
+        """Visualize attention maps overlaid on images
+        Args:
+            images: Input images (B, C, H, W)
+            layer_idx: Which transformer layer to visualize
+            head_idx: Which attention head to visualize
+            save_path: Optional path to save visualization
+            alpha: Transparency of attention overlay (0-1)
+        """
+        B, C, H, W = images.shape
+        P = self.n_patches
         
-        # CIFAR-10 classes
-        classes = ['airplane', 'automobile', 'bird', 'cat', 'deer',
-                'dog', 'frog', 'horse', 'ship', 'truck']
-        
-        # Get model prediction
+        # Get attention weights from specified layer/head
         self.eval()
         with torch.no_grad():
-            output = self(images)
-            logits = output[0] if isinstance(output, tuple) else output
-            pred_prob = torch.nn.functional.softmax(logits, dim=1)
-            pred_class = torch.argmax(pred_prob, dim=1).item()
-            pred_confidence = pred_prob[0][pred_class].item()
+            _ = self(images)  # Forward pass to get attention weights
+            attn_weights = self.blocks[layer_idx].msa.attention_weights
             
-            # Get attention weights
-            device = images.device
-            n, c, h, w = images.shape
-            
-            # Denormalize images for visualization
-            mean = torch.tensor([0.5, 0.5, 0.5]).view(3, 1, 1).to(device)
-            std = torch.tensor([0.5, 0.5, 0.5]).view(3, 1, 1).to(device)
-            denorm_images = images * std + mean
-            
-            # Forward pass to get attention weights
-            patches = self.patchify(images, self.n_patches)
-            patches = patches.to(device)
-            embeddings = self.embedding(patches)
-            
-            batch_class_tokens = self.class_token.expand(n, 1, -1).to(device)
-            embeddings = torch.cat([batch_class_tokens, embeddings], dim=1)
-            embeddings = embeddings + self.pos_embed.to(device)
-            
-            for i, block in enumerate(self.blocks):
-                if i == layer_idx:
-                    normed = block.norm1(embeddings)
-                    _ = block.msa(normed)
-                    attention_weights = block.msa.attention_weights
-                    break
-                embeddings = block(embeddings)
-            
-            att_map = attention_weights[0, head_idx].cpu()
-            
-            # Create visualization with prediction
-            fig = plt.figure(figsize=(16, 8))
-            plt.suptitle(f'Prediction: {classes[pred_class]} ({pred_confidence:.2%})', fontsize=14)
-            
-            # Plot original image
-            ax1 = plt.subplot(121)
-            img_viz = torch.clamp(denorm_images[0].permute(1, 2, 0).cpu(), 0, 1)
-            ax1.imshow(img_viz)
-            ax1.set_title('Original Image')
-            ax1.axis('off')
-            
-            # Plot attention map
-            ax2 = plt.subplot(122)
-            im = ax2.imshow(att_map.detach(), cmap='viridis')
-            ax2.set_title(f'Attention Map (Layer {layer_idx}, Head {head_idx})')
-            plt.colorbar(im, ax=ax2)
-            
-            if save_path:
-                plt.savefig(save_path)
-            plt.show()
-            plt.close()
+        # Remove CLS token attention and reshape
+        attn_weights = attn_weights[:, head_idx, 1:, 1:]  # (B, P*P, P*P)
+        attn_weights = attn_weights.reshape(B, P, P, P, P)  # (B, P, P, P, P)
+        
+        # Use provided axis or current axis
+        if ax is None:
+            ax = plt.gca()
+        
+        # Display original image
+        img = images[0].permute(1, 2, 0).cpu()
+        img = img * torch.tensor([0.229, 0.224, 0.225]) + torch.tensor([0.485, 0.456, 0.406])
+        img = img.clip(0, 1)
+        ax.imshow(img)
+        
+        # Calculate attention heatmap
+        avg_attn = attn_weights[0].mean(dim=(2, 3))  # (P, P)
+        
+        # Resize attention map to match image dimensions
+        attention_resized = torch.nn.functional.interpolate(
+            avg_attn.unsqueeze(0).unsqueeze(0), 
+            size=(H, W), 
+            mode='bilinear'
+        ).squeeze().cpu()
+        
+        # Create overlay
+        im = ax.imshow(attention_resized, cmap='viridis', alpha=alpha)
+        plt.colorbar(im, ax=ax, label='Attention Weight')
+        
+        # Add grid lines for patches
+        for i in range(P):
+            ax.axhline(y=i*(H//P), color='white', alpha=0.3)
+            ax.axvline(x=i*(W//P), color='white', alpha=0.3)
+        
+        ax.set_title(f'Layer {layer_idx}, Head {head_idx}')
+        ax.axis('off')
+        
+        if save_path:
+            plt.savefig(save_path, bbox_inches='tight')
