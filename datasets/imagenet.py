@@ -14,14 +14,14 @@ def get_imagenet_loaders(batch_size=128, num_workers=0):
     )
     
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop((224, 224), scale = (0.25, 1.0)),
+        transforms.RandomResizedCrop((192, 192), scale = (0.25, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize,
     ])
     
     val_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((192, 192)),
         # transforms.CenterCrop(128),
         transforms.ToTensor(),
         normalize,

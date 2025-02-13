@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import math
 import json
 
+from sklearn.manifold import TSNE
 from torch.optim import Adam
 from torch.nn import CrossEntropyLoss
 from torch.utils.data import DataLoader
@@ -227,11 +228,12 @@ class ViT(nn.Module):
         """
         B, C, H, W = images.shape
         P = self.n_patches
+        patch_size = H // P
         
         # Get attention weights from specified layer/head
         self.eval()
         with torch.no_grad():
-            _ = self(images)  # Forward pass to get attention weights
+            _ = self(images)
             attn_weights = self.blocks[layer_idx].msa.attention_weights
             
         # Remove CLS token attention and reshape
@@ -251,24 +253,121 @@ class ViT(nn.Module):
         # Calculate attention heatmap
         avg_attn = attn_weights[0].mean(dim=(2, 3))  # (P, P)
         
-        # Resize attention map to match image dimensions
-        attention_resized = torch.nn.functional.interpolate(
-            avg_attn.unsqueeze(0).unsqueeze(0), 
-            size=(H, W), 
-            mode='bilinear'
-        ).squeeze().cpu()
+        # Create a full-size attention map with blocked patches
+        attention_map = torch.zeros((H, W))
+        for i in range(P):
+            for j in range(P):
+                attention_map[i*patch_size:(i+1)*patch_size, 
+                            j*patch_size:(j+1)*patch_size] = avg_attn[i, j]
         
         # Create overlay
-        im = ax.imshow(attention_resized, cmap='viridis', alpha=alpha)
+        im = ax.imshow(attention_map.cpu(), cmap='viridis', alpha=alpha)
         plt.colorbar(im, ax=ax, label='Attention Weight')
         
         # Add grid lines for patches
         for i in range(P):
-            ax.axhline(y=i*(H//P), color='white', alpha=0.3)
-            ax.axvline(x=i*(W//P), color='white', alpha=0.3)
+            ax.axhline(y=i*patch_size, color='white', alpha=0.3)
+            ax.axvline(x=i*patch_size, color='white', alpha=0.3)
         
         ax.set_title(f'Layer {layer_idx}, Head {head_idx}')
         ax.axis('off')
         
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
+
+    def visualize_class_separation(self, class_idx1, class_idx2, k=10, dataloader=None, perplexity=5, random_state=42, save_path=None):
+        """
+        Visualize how two classes are separated in embedding space across transformer layers.
+        
+        Args:
+            class_idx1 (int): First class index (0-999)
+            class_idx2 (int): Second class index (0-999)
+            k (int): Number of samples per class
+            dataloader: DataLoader containing the dataset
+            perplexity (int): t-SNE perplexity parameter
+            random_state (int): Random seed for reproducibility
+            save_path (str): Optional path to save the visualization
+        """
+        
+        
+        if dataloader is None:
+            raise ValueError("DataLoader must be provided")
+        
+        # Set model to eval mode
+        self.eval()
+        
+        # Collect k samples from each class
+        samples1, samples2 = [], []
+        labels1, labels2 = [], []
+        
+        with torch.no_grad():
+            for images, labels in dataloader:
+                mask1 = labels == class_idx1
+                mask2 = labels == class_idx2
+                
+                if mask1.any():
+                    samples1.extend(images[mask1])
+                    labels1.extend(labels[mask1])
+                if mask2.any():
+                    samples2.extend(images[mask2])
+                    labels2.extend(labels[mask2])
+                
+                if len(samples1) >= k and len(samples2) >= k:
+                    break
+        
+        # Trim to k samples per class
+        samples1 = samples1[:k]
+        samples2 = samples2[:k]
+        
+        # Combine samples
+        all_samples = torch.stack(samples1 + samples2).cuda()
+        all_labels = torch.tensor(labels1[:k] + labels2[:k]).cuda()
+        
+        # Create figure grid: one row for each layer plus the input
+        n_rows = self.n_blocks + 1
+        fig, axes = plt.subplots(1, n_rows, figsize=(5*n_rows, 5))
+        fig.suptitle(f'Class {class_idx1} vs Class {class_idx2} Separation Across Layers', fontsize=16)
+        
+        # Get embeddings from each layer
+        device = next(self.parameters()).device
+        all_samples = all_samples.to(device)
+        
+        with torch.no_grad():
+            # Get patch embeddings
+            patches = self.patchify(all_samples)
+            embeddings = self.embedding(patches)
+            batch_class_tokens = self.class_token.expand(len(all_samples), 1, -1)
+            embeddings = torch.cat([batch_class_tokens, embeddings], dim=1)
+            embeddings = embeddings + self.pos_embed
+            embeddings = self.dropout(embeddings)
+            
+            # Initialize t-SNE
+            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=random_state)
+            
+            # Plot initial embeddings
+            cls_embedding = embeddings[:, 0].cpu().numpy()
+            tsne_result = tsne.fit_transform(cls_embedding)
+            
+            axes[0].scatter(tsne_result[:k, 0], tsne_result[:k, 1], c='blue', label=f'Class {class_idx1}')
+            axes[0].scatter(tsne_result[k:, 0], tsne_result[k:, 1], c='red', label=f'Class {class_idx2}')
+            axes[0].set_title('Initial Embeddings')
+            axes[0].legend()
+            
+            # Process each transformer block
+            for i, block in enumerate(self.blocks):
+                embeddings = block(embeddings)
+                cls_embedding = embeddings[:, 0].cpu().numpy()
+                
+                # Apply t-SNE
+                tsne_result = tsne.fit_transform(cls_embedding)
+                
+                # Plot
+                axes[i+1].scatter(tsne_result[:k, 0], tsne_result[:k, 1], c='blue', label=f'Class {class_idx1}')
+                axes[i+1].scatter(tsne_result[k:, 0], tsne_result[k:, 1], c='red', label=f'Class {class_idx2}')
+                axes[i+1].set_title(f'Layer {i+1}')
+                axes[i+1].legend()
+        
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        plt.show()

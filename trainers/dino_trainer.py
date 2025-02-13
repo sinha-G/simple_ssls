@@ -1,14 +1,17 @@
-# trainers/dino_trainer.py
+import os
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
+import random
+import matplotlib.pyplot as plt
+
 from torchvision import transforms
 from datetime import datetime
 from .semi_supervised_base import SemiSupervisedTrainer
 from copy import deepcopy
 from tqdm.auto import tqdm
-import random
+
 
 class TensorSolarization:
     def __init__(self, threshold=0.5):
@@ -214,13 +217,20 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         
         return loss
 
-    def finetune(self, train_loader, test_loader, epochs=100, lr=0.0001, patience=10, evaluate_every=1, visualize_every=1):
+    def finetune(self, train_loader, test_loader, epochs=100, lr=0.0001, patience=10, evaluate_every=1, visualize_every=1, 
+                 checkpoint_path='checkpoints', resume_from=None):
+        
         # Setup for finetuning
+        os.makedirs(checkpoint_path, exist_ok=True)
+        
         self.student.train()
         optimizer = torch.optim.Adam(self.student.parameters(), lr=lr)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
         criterion = torch.nn.CrossEntropyLoss()
         
+        start_epoch = 0
+        best_acc = 0
+        patience_counter = 0
         history = {
             'train_loss': [],
             'train_acc': [],
@@ -228,12 +238,22 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
             'lr': []
         }
         
-        best_acc = 0
-        best_model_state = None
-        patience_counter = 0
-        
+        if resume_from and os.path.exists(resume_from):
+            print(f"Loading checkpoint from {resume_from}")
+            checkpoint = torch.load(resume_from)
+            self.student.load_state_dict(checkpoint['model_state'])
+            optimizer.load_state_dict(checkpoint['optimizer_state'])
+            scheduler.load_state_dict(checkpoint['scheduler_state'])
+            start_epoch = checkpoint['epoch']
+            best_acc = checkpoint['best_acc']
+            history = checkpoint['history']
+            print(f"Resuming from epoch {start_epoch} with best accuracy {best_acc:.2f}%")
+
         # Add epoch progress bar
         epoch_pbar = tqdm(range(epochs), desc='Epochs', position=0)
+
+        with open('data/imagenet/imagenet1000_clsidx_to_labels.txt', 'r') as f:
+            class_labels = eval(f.read())
 
         for epoch in epoch_pbar:
             torch.cuda.empty_cache()
@@ -299,12 +319,22 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
                 print(f"\nVisualizing attention at epoch {epoch+1}...")
                 for i in random_idx:  # Visualize a couple of images
                     for layer in range(self.student.n_blocks):
-                        for head in range(min(self.student.n_heads, 2)):
+                        fig, axes = plt.subplots(1, min(self.student.n_heads, 4), figsize=(20, 5))
+                        if self.student.n_heads == 1:
+                            axes = [axes]
+                        for head in range(min(self.student.n_heads, 4)):  # Show up to 4 heads
                             self.student.visualize_attention(
-                                images=images[i].unsqueeze(0),
+                                images=test_loader.dataset[i][0].unsqueeze(0).to('cuda'),
                                 layer_idx=layer,
-                                head_idx=head
+                                head_idx=head,
+                                alpha=0.6,
+                                ax=axes[head]
                             )
+                        class_idx = test_loader.dataset[i][1]
+                        class_name = class_labels[class_idx]
+                        plt.suptitle(f'Layer {layer} Attention Maps\nClass: {class_name}', size=16)
+                        plt.tight_layout()
+                        plt.show()
             
             # Update history
             history['train_loss'].append(avg_loss)
@@ -312,9 +342,34 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
             history['test_acc'].append(test_acc if 'test_acc' in locals() else 0)
             history['lr'].append(optimizer.param_groups[0]['lr'])
         
-        # Restore best model
-        if best_model_state is not None:
-            self.student.load_state_dict(best_model_state)
+            # After evaluation, save checkpoint
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            checkpoint_file = os.path.join(
+                checkpoint_path, 
+                f'checkpoint_epoch_{epoch+1}_{timestamp}.pt'
+            )
+            
+            # Save checkpoint
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state': self.student.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'scheduler_state': scheduler.state_dict(),
+                'best_acc': best_acc,
+                'history': history
+            }
+            
+            # Save as latest checkpoint and best checkpoint if applicable
+            torch.save(checkpoint, os.path.join(checkpoint_path, 'latest_checkpoint.pt'))
+            if 'test_acc' in locals() and test_acc >= best_acc:
+                torch.save(checkpoint, os.path.join(checkpoint_path, 'best_checkpoint.pt'))
+                
+            print(f"Checkpoint saved to {checkpoint_file}")
+            
+            # Early stopping check
+            if patience_counter >= patience:
+                print("\nEarly stopping triggered")
+                break
         
         return history
 
