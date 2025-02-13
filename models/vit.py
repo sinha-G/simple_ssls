@@ -1,7 +1,10 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import matplotlib.colors as mcolors
 import math
 import json
 
@@ -20,50 +23,29 @@ class MSA(nn.Module):
         if  d % n_heads != 0:
             raise ValueError(f"Embedding dimension {d} must be divisible by the number of heads {n_heads}.")
 
-        # Single linear layers for all heads combined.
         self.q_proj = nn.Linear(d, d)
         self.k_proj = nn.Linear(d, d)
         self.v_proj = nn.Linear(d, d)
-        
         self.out_proj = nn.Linear(d, d)
-        
         self.softmax = nn.Softmax(dim=-1)
-        
         self.attention_weights = None
 
     def forward(self, sequences):
-        # sequences shape: (batch_size, seq_len, d)
         batch_size, seq_len, _ = sequences.shape
+        q = self.q_proj(sequences).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        k = self.k_proj(sequences).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        v = self.v_proj(sequences).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
         
-        # Compute Q, K, V for all heads at once.
-        q = self.q_proj(sequences)  # (batch_size, seq_len, d)
-        k = self.k_proj(sequences)
-        v = self.v_proj(sequences)
-        
-        # Reshape to (batch_size, seq_len, n_heads, d_head) and then transpose to (batch_size, n_heads, seq_len, d_head)
-        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        
-        # Compute scaled dot-product attention scores.
-        # scores shape: (batch_size, n_heads, seq_len, seq_len)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_head)
+        scores = torch.einsum('bhqd,bhkd->bhqk', q, k) / math.sqrt(self.d_head)
         attn = self.softmax(scores)
-        self.attention_weights = attn.detach()  # save for inspection if needed
+        self.attention_weights = attn.detach()
         
-        # Multiply the attention weights by the values.
-        # out shape: (batch_size, n_heads, seq_len, d_head)
-        out = torch.matmul(attn, v)
-        
-        # Transpose and reshape back to (batch_size, seq_len, d)
-        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d)
-        
-        out = self.out_proj(out)
-        return out
+        out = torch.einsum('bhqk,bhkd->bhqd', attn, v).transpose(1, 2).contiguous().view(batch_size, seq_len, self.d)
+        return self.out_proj(out)
 
 class ViTBlock(nn.Module):
     def __init__(self, hidden_d, n_heads, mlp_ratio=4, dropout=0.1):
-        super(ViTBlock, self).__init__()
+        super().__init__()
         self.hidden_d = hidden_d
         self.n_heads = n_heads
         
@@ -72,7 +54,7 @@ class ViTBlock(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_d)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_d, hidden_d * mlp_ratio),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_d * mlp_ratio, hidden_d)
         )
@@ -98,97 +80,45 @@ class ViT(nn.Module):
         if chw[1] % n_patches != 0:
             raise ValueError('Input image dimensions must be divisible by the number of patches.')
  
-        # Embedding Layer
         self.patch_size = chw[1] // self.n_patches
-        self.input_d = int((self.patch_size ** 2) * chw[0])
-        self.embedding = nn.Linear(self.input_d, self.hidden_d) 
-
-        # Learnable [CLS] token
+        self.input_d = (self.patch_size ** 2) * chw[0]
+        self.embedding = nn.Linear(self.input_d, self.hidden_d)
         self.class_token = nn.Parameter(torch.randn(1, self.hidden_d))
-
-        # Positional Embeddings
-        self.pos_embed = self.get_positional_embeddings(self.n_patches ** 2 + 1, self.hidden_d)
-        self.pos_embed = nn.Parameter(self.pos_embed, requires_grad=False)
-        
-        # Add dropout layer
+        self.register_buffer('pos_embed', self.get_positional_embeddings(self.n_patches ** 2 + 1, self.hidden_d))
         self.dropout = nn.Dropout(dropout)
-
-        # Transformer Encoder
-        self.blocks = nn.ModuleList([
-            ViTBlock(self.hidden_d, self.n_heads, dropout=dropout) for _ in range(self.n_blocks)
-        ])
-
-        # MLP Head for classification
-        self.mlp = nn.Sequential(
-            nn.Linear(self.hidden_d, num_classes)
-        )
+        self.blocks = nn.ModuleList([ViTBlock(self.hidden_d, self.n_heads, dropout=dropout) for _ in range(self.n_blocks)])
+        self.mlp = nn.Linear(self.hidden_d, num_classes)
 
         if use_projection_head:
             self.projection = nn.Sequential(
                 nn.Linear(hidden_d, hidden_d),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.Dropout(dropout),
                 nn.Linear(hidden_d, hidden_d)
             )
 
     def patchify(self, images):
-        n, c, h, w = images.shape
-        n_patches = self.n_patches
-
-        if h != w:
-            raise ValueError(f'Input images must be square. Got: {h}x{w}')
-        if h % n_patches != 0:
-            raise ValueError(f'Input image dimensions must be divisible by the number of patches. Got: {h}x{w} and {n_patches} patches.')
-        
-        patches = torch.zeros(n, n_patches ** 2, h * w * c  // n_patches ** 2)
-        patch_size = h // n_patches
-        
-        # Reshape to: (batch_size, n_patches², patch_size² * channels)
-        patches = images.reshape(
-            n, c, 
-            n_patches, patch_size, 
-            n_patches, patch_size
-        )
-        patches = patches.permute(0, 2, 4, 3, 5, 1)
-        patches = patches.reshape(n, n_patches * n_patches, -1)
-
-        # print(f"Debug - Final patches shape: {patches.shape}")  # Debug print
-        
-        return patches
+        return F.unfold(images, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
 
     def get_positional_embeddings(self, sequence_length, d):
-        # Create a tensor of positions (shape: [sequence_length, 1])
         positions = torch.arange(sequence_length, dtype=torch.float32).unsqueeze(1)
-        
-        # Compute the div_term for even indices (shape: [d/2])
         div_term = torch.exp(torch.arange(0, d, 2, dtype=torch.float32) * (-math.log(10000.0) / d))
-        
-        # Initialize the positional embeddings tensor (shape: [sequence_length, d])
         pe = torch.zeros(sequence_length, d)
-        
-        # Apply sin to even indices in the array; 2i
         pe[:, 0::2] = torch.sin(positions * div_term)
-        
-        # Apply cos to odd indices in the array; 2i+1
         pe[:, 1::2] = torch.cos(positions * div_term)
-        
         return pe
 
 
     def forward(self, images):
         # Get device from images
         device = images.device
-        
         n, c, h, w = images.shape
 
         # Patchify images
-        # print(f"Input shape: {images.shape}")  # Debug
         patches = self.patchify(images).to(device)
-        # print(f"Patch shape: {patches.shape}")  # Debug
         
         # Embed patches
         embeddings = self.embedding(patches)
-        # print(f"Embedding shape: {embeddings.shape}")  # Debug
         
         # Add class token and move to correct device
         batch_class_tokens = self.class_token.expand(n, 1, -1).to(device)
@@ -275,9 +205,9 @@ class ViT(nn.Module):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
 
-    def visualize_class_separation(self, class_idx1, class_idx2, k=10, dataloader=None, perplexity=5, random_state=42, save_path=None):
+    def visualize_class_separation(self, class_indices, k=10, dataloader=None, perplexity=5, random_state=42, save_path=None):
         """
-        Visualize how two classes are separated in embedding space across transformer layers.
+        Visualize how two classes are separated in embedding space across transformer layers using animation.
         
         Args:
             class_idx1 (int): First class index (0-999)
@@ -286,9 +216,8 @@ class ViT(nn.Module):
             dataloader: DataLoader containing the dataset
             perplexity (int): t-SNE perplexity parameter
             random_state (int): Random seed for reproducibility
-            save_path (str): Optional path to save the visualization
+            save_path (str): Optional path to save the animation (should end in .gif)
         """
-        
         
         if dataloader is None:
             raise ValueError("DataLoader must be provided")
@@ -296,41 +225,50 @@ class ViT(nn.Module):
         # Set model to eval mode
         self.eval()
         
-        # Collect k samples from each class
-        samples1, samples2 = [], []
-        labels1, labels2 = [], []
+        colors = list(mcolors.TABLEAU_COLORS.values())
+        if len(class_indices) > len(colors):
+            colors = plt.cm.get_cmap('tab20')(np.linspace(0, 1, len(class_indices)))
+        
+        # Collect k samples for each class
+        all_samples = []
+        all_labels = []
         
         with torch.no_grad():
             for images, labels in dataloader:
-                mask1 = labels == class_idx1
-                mask2 = labels == class_idx2
-                
-                if mask1.any():
-                    samples1.extend(images[mask1])
-                    labels1.extend(labels[mask1])
-                if mask2.any():
-                    samples2.extend(images[mask2])
-                    labels2.extend(labels[mask2])
-                
-                if len(samples1) >= k and len(samples2) >= k:
+                for idx, class_idx in enumerate(class_indices):
+                    mask = labels == class_idx
+                    if mask.any():
+                        class_samples = images[mask][:k]
+                        all_samples.extend(class_samples)
+                        all_labels.extend([idx] * len(class_samples))
+                    
+                if all(sum(1 for label in all_labels if label == idx) >= k for idx in range(len(class_indices))):
                     break
         
-        # Trim to k samples per class
-        samples1 = samples1[:k]
-        samples2 = samples2[:k]
+        # Trim to exactly k samples per class if we have more
+        samples_by_class = {idx: [] for idx in range(len(class_indices))}
+        labels_by_class = {idx: [] for idx in range(len(class_indices))}
         
-        # Combine samples
-        all_samples = torch.stack(samples1 + samples2).cuda()
-        all_labels = torch.tensor(labels1[:k] + labels2[:k]).cuda()
+        for sample, label in zip(all_samples, all_labels):
+            if len(samples_by_class[label]) < k:
+                samples_by_class[label].append(sample)
+                labels_by_class[label].append(label)
         
-        # Create figure grid: one row for each layer plus the input
-        n_rows = self.n_blocks + 1
-        fig, axes = plt.subplots(1, n_rows, figsize=(5*n_rows, 5))
-        fig.suptitle(f'Class {class_idx1} vs Class {class_idx2} Separation Across Layers', fontsize=16)
+        all_samples = []
+        all_labels = []
+        for idx in range(len(class_indices)):
+            all_samples.extend(samples_by_class[idx])
+            all_labels.extend(labels_by_class[idx])
         
-        # Get embeddings from each layer
-        device = next(self.parameters()).device
-        all_samples = all_samples.to(device)
+        # Convert to tensors
+        all_samples = torch.stack(all_samples).cuda()
+        all_labels = torch.tensor(all_labels).cuda()
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(10, 10))
+        
+        # Store transformer layer embeddings
+        all_embeddings = []
         
         with torch.no_grad():
             # Get patch embeddings
@@ -341,33 +279,61 @@ class ViT(nn.Module):
             embeddings = embeddings + self.pos_embed
             embeddings = self.dropout(embeddings)
             
-            # Initialize t-SNE
-            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=random_state)
-            
-            # Plot initial embeddings
-            cls_embedding = embeddings[:, 0].cpu().numpy()
-            tsne_result = tsne.fit_transform(cls_embedding)
-            
-            axes[0].scatter(tsne_result[:k, 0], tsne_result[:k, 1], c='blue', label=f'Class {class_idx1}')
-            axes[0].scatter(tsne_result[k:, 0], tsne_result[k:, 1], c='red', label=f'Class {class_idx2}')
-            axes[0].set_title('Initial Embeddings')
-            axes[0].legend()
-            
             # Process each transformer block
-            for i, block in enumerate(self.blocks):
+            for block in self.blocks:
                 embeddings = block(embeddings)
                 cls_embedding = embeddings[:, 0].cpu().numpy()
-                
-                # Apply t-SNE
-                tsne_result = tsne.fit_transform(cls_embedding)
-                
-                # Plot
-                axes[i+1].scatter(tsne_result[:k, 0], tsne_result[:k, 1], c='blue', label=f'Class {class_idx1}')
-                axes[i+1].scatter(tsne_result[k:, 0], tsne_result[k:, 1], c='red', label=f'Class {class_idx2}')
-                axes[i+1].set_title(f'Layer {i+1}')
-                axes[i+1].legend()
+                all_embeddings.append(cls_embedding)
         
-        plt.tight_layout()
+        # Initialize t-SNE
+        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=random_state)
+        
+        tsne_results = []
+        for emb in all_embeddings:
+            tsne_result = tsne.fit_transform(emb)
+            tsne_results.append(tsne_result)
+        
+        # Find global min/max for consistent axis scaling
+        all_tsne = np.vstack(tsne_results)
+        x_min, x_max = all_tsne[:, 0].min(), all_tsne[:, 0].max()
+        y_min, y_max = all_tsne[:, 1].min(), all_tsne[:, 1].max()
+        
+        # Add padding to limits
+        padding = 0.1
+        x_range = x_max - x_min
+        y_range = y_max - y_min
+        x_min -= padding * x_range
+        x_max += padding * x_range
+        y_min -= padding * y_range
+        y_max += padding * y_range
+
+        def animate(frame):
+            ax.clear()
+            tsne_result = tsne_results[frame]
+            
+            for idx in range(len(class_indices)):
+                mask = np.array(all_labels.cpu()) == idx
+                ax.scatter(
+                    tsne_result[mask, 0], 
+                    tsne_result[mask, 1], 
+                    c=[colors[idx]], 
+                    label=f'Class {class_indices[idx]}'
+                )
+            
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min, y_max)
+            ax.legend()
+            ax.set_title(f'Layer {frame + 1}')
+        
+        # Create animation
+        anim = animation.FuncAnimation(
+            fig, animate, frames=len(all_embeddings), 
+            interval=1000, repeat=True
+        )
+        
         if save_path:
-            plt.savefig(save_path, bbox_inches='tight', dpi=300)
-        plt.show()
+            anim.save(save_path, writer='pillow')
+        
+        plt.close()
+        
+        return anim
