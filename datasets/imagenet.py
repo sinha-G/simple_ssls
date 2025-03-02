@@ -4,6 +4,8 @@ from torchvision import datasets
 from torchvision.transforms import autoaugment, RandomErasing
 from torch.utils.data import DataLoader
 
+torch.backends.cudnn.benchmark = True
+
 def get_imagenet_loaders(batch_size=128, num_workers=0):
     """
     Creates data loaders for ImageNet dataset.
@@ -15,22 +17,36 @@ def get_imagenet_loaders(batch_size=128, num_workers=0):
     )
     
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop((196, 196), scale = (0.25, 1.0)),
+        # Spatial transforms first (on PIL Image)
+        transforms.RandomResizedCrop(
+            (192, 192), 
+            scale=(0.25, 1.0),
+            interpolation=transforms.InterpolationMode.BILINEAR
+        ),
         transforms.RandomHorizontalFlip(),
-        autoaugment.RandAugment(num_ops=2, magnitude=7),
+        
+        # Color augmentations (on PIL Image)
         transforms.ColorJitter(
             brightness=0.25,
             contrast=0.25,
             saturation=0.25,
             hue=0.1
         ),
+        # RandAugment before tensor conversion
+        # autoaugment.RandAugment(num_ops=2, magnitude=7),
+        
+        # Convert to tensor
         transforms.ToTensor(),
+        
+        # Normalize
         normalize,
+        
+        # Random erasing (works on tensor)
         RandomErasing(p=0.1, value='random')
     ])
     
     val_transform = transforms.Compose([
-        transforms.Resize((196, 196)),
+        transforms.Resize((192, 192)),
         transforms.ToTensor(),
         normalize,
     ])
@@ -53,6 +69,7 @@ def get_imagenet_loaders(batch_size=128, num_workers=0):
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
+        prefetch_factor=2,  # Prefetch 2 batches per worker
         # persistent_workers=True
     )
     
