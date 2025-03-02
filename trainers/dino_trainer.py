@@ -240,7 +240,7 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
             {'params': decay, 'weight_decay': 0.03},
             {'params': no_decay, 'weight_decay': 0.0}
         ], lr=lr, betas=(0.9, 0.999))
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience ** 0.5)
         criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
         
         start_epoch = 0
@@ -267,8 +267,8 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         # Add epoch progress bar
         epoch_pbar = tqdm(range(epochs), desc='Epochs', position=0)
 
-        with open('data/imagenet/imagenet1000_clsidx_to_labels.txt', 'r') as f:
-            class_labels = eval(f.read())
+        # with open('data/imagenet/imagenet1000_clsidx_to_labels.txt', 'r') as f:
+        #     class_labels = eval(f.read())
 
         for epoch in epoch_pbar:
             torch.cuda.empty_cache()
@@ -349,8 +349,8 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
                                 ax=axes[head]
                             )
                         class_idx = test_loader.dataset[i][1]
-                        class_name = class_labels[class_idx]
-                        plt.suptitle(f'Layer {layer} Attention Maps\nClass: {class_name}', size=16)
+                        # class_name = class_labels[class_idx]
+                        plt.suptitle(f'Layer {layer} Attention Maps\nClass: {class_idx}', size=16)
                         plt.tight_layout()
                         plt.show()
             

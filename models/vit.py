@@ -321,7 +321,7 @@ class ViT(nn.Module):
                 all_embeddings.append(cls_embedding)
         
         # Initialize t-SNE
-        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=random_state)
+        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=random_state, learning_rate="auto", init="pca")
         
         tsne_results = []
         for emb in all_embeddings:
