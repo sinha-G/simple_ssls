@@ -372,3 +372,127 @@ class ViT(nn.Module):
         plt.close()
         
         return anim
+
+    def visualize_cam(self, images, target_class=None, layer_idx=-1, head_idx=None, save_path=None, alpha=0.6, ax=None):
+        """Visualize class activation mapping for Vision Transformer
+        
+        Args:
+            images: Input images (B, C, H, W)
+            target_class: Target class index. If None, uses predicted class
+            layer_idx: Which transformer layer to visualize (-1 for last layer)
+            head_idx: Which attention head to visualize, None for average of all heads
+            save_path: Optional path to save visualization
+            alpha: Transparency of attention overlay (0-1)
+            ax: Optional matplotlib axis to plot on
+        """
+        B, C, H, W = images.shape
+        P = self.n_patches
+        patch_size = H // P
+        
+        # Ensure layer_idx is valid
+        if layer_idx < 0:
+            layer_idx = len(self.blocks) + layer_idx
+        
+        # Forward pass to get class predictions and attention
+        self.eval()
+        with torch.no_grad():
+            logits, _ = self(images)
+            
+            # Get class to visualize (predicted or specified)
+            if target_class is None:
+                target_class = logits.argmax(dim=1)[0].item()
+            
+            # Get attention weights from specified layer
+            attn_weights = self.blocks[layer_idx].msa.attention_weights
+            
+            # Get attention from CLS token to other tokens
+            # (B, num_heads, 1+P*P, 1+P*P) -> (B, num_heads, 1, P*P)
+            cls_attn = attn_weights[:, :, 0, 1:]
+            
+            # Average across heads if not specified
+            if head_idx is None:
+                # Average over all heads
+                cls_attn = cls_attn.mean(dim=1)  # (B, P*P)
+            else:
+                # Use specified head
+                cls_attn = cls_attn[:, head_idx, :]  # (B, P*P)
+            
+            # Get final layer weights for target class
+            # These weights connect the embeddings to the class prediction
+            cam_weights = self.mlp.weight[target_class].detach()  # (hidden_d)
+            
+            # Get patch embeddings before the projection to class logits
+            patch_tokens = self._forward_features(images)[:, 1:, :]  # (B, P*P, hidden_d)
+            
+            # Compute activation scores
+            patch_cam = torch.matmul(patch_tokens, cam_weights)  # (B, P*P)
+            
+            # Combine with attention weights
+            cam = cls_attn.squeeze() * patch_cam.squeeze()  # (P*P)
+            
+            # Reshape to patch grid
+            cam = cam.reshape(P, P)  # (P, P)
+            
+        # Use provided axis or current axis
+        if ax is None:
+            ax = plt.gca()
+        
+        # Display original image
+        img = images[0].permute(1, 2, 0).cpu()
+        img = img * torch.tensor([0.229, 0.224, 0.225]) + torch.tensor([0.485, 0.456, 0.406])
+        img = img.clip(0, 1)
+        ax.imshow(img)
+        
+        # Create full-resolution CAM
+        attention_map = torch.zeros((H, W), device=cam.device)
+        for i in range(P):
+            for j in range(P):
+                attention_map[i*patch_size:(i+1)*patch_size, 
+                            j*patch_size:(j+1)*patch_size] = cam[i, j]
+        
+        # Create overlay with same style as visualize_attention
+        im = ax.imshow(attention_map.cpu(), cmap='viridis', alpha=alpha)
+        plt.colorbar(im, ax=ax, label='CAM Activation')
+        
+        # Add grid lines for patches
+        for i in range(P):
+            ax.axhline(y=i*patch_size, color='white', alpha=0.3)
+            ax.axvline(x=i*patch_size, color='white', alpha=0.3)
+        
+        # Add class information
+        class_name = f"Class {target_class}"
+        ax.set_title(f"CAM for {class_name} (Layer {layer_idx})")
+        ax.axis('off')
+        
+        if save_path:
+            plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        
+        return ax
+
+    # Helper method to extract features
+    def _forward_features(self, images):
+        """Extract patch features before classification head"""
+        # Get device from images
+        device = images.device
+        n, c, h, w = images.shape
+
+        # Patchify images
+        patches = self.patchify(images).to(device)
+        
+        # Embed patches
+        embeddings = self.embedding(patches)
+        
+        # Add class token and positional embeddings
+        batch_class_tokens = self.class_token.expand(n, 1, -1).to(device)
+        embeddings = torch.cat([batch_class_tokens, embeddings], dim=1)
+        embeddings = embeddings + self.pos_embed.to(device)
+        embeddings = self.dropout(embeddings)
+        
+        # Pass through transformer blocks
+        for block in self.blocks:
+            embeddings = block(embeddings)
+        
+        # Apply final layer normalization
+        embeddings = self.norm(embeddings)
+        
+        return embeddings
