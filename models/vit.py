@@ -29,6 +29,13 @@ class MSA(nn.Module):
         self.out_proj = nn.Linear(d, d)
         self.softmax = nn.Softmax(dim=-1)
         self.attention_weights = None
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in [self.q_proj, self.k_proj, self.v_proj, self.out_proj]:
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
     def forward(self, sequences):
         batch_size, seq_len, _ = sequences.shape
@@ -61,8 +68,9 @@ class ViTBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        out = x + self.dropout(self.msa(self.norm1(x)))
-        return out + self.dropout(self.mlp(self.norm2(out)))
+        x = x + self.dropout(self.msa(self.norm1(x)))
+        x = x + self.dropout(self.mlp(self.norm2(x)))
+        return x
 
 class ViT(nn.Module):
     def __init__(self, chw, n_patches, n_blocks, hidden_d, n_heads, num_classes, use_projection_head=False, dropout=0.1):
@@ -87,6 +95,7 @@ class ViT(nn.Module):
         self.register_buffer('pos_embed', self.get_positional_embeddings(self.n_patches ** 2 + 1, self.hidden_d))
         self.dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList([ViTBlock(self.hidden_d, self.n_heads, dropout=dropout) for _ in range(self.n_blocks)])
+        self.norm = nn.LayerNorm(self.hidden_d)
         self.mlp = nn.Linear(self.hidden_d, num_classes)
 
         if use_projection_head:
@@ -96,6 +105,29 @@ class ViT(nn.Module):
                 nn.Dropout(dropout),
                 nn.Linear(hidden_d, hidden_d)
             )
+
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        # Initialize patch embedding
+        nn.init.trunc_normal_(self.embedding.weight, std=0.02)
+        # Initialize class token
+        nn.init.trunc_normal_(self.class_token, std=0.02)
+        # Initialize position embedding
+        nn.init.zeros_(self.pos_embed)
+        
+        # Initialize MLP heads
+        if hasattr(self, 'mlp'):
+            nn.init.xavier_uniform_(self.mlp.weight)
+            nn.init.zeros_(self.mlp.bias)
+        
+        if hasattr(self, 'projection'):
+            for layer in self.projection:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
 
     def patchify(self, images):
         return F.unfold(images, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
@@ -133,6 +165,9 @@ class ViT(nn.Module):
         # Pass through transformer blocks
         for block in self.blocks:
             embeddings = block(embeddings)
+
+        # Apply final layer norm
+        embeddings = self.norm(embeddings)
             
         # Get class token output
         class_token_output = embeddings[:, 0]

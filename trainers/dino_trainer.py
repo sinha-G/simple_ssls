@@ -217,16 +217,31 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
         
         return loss
 
-    def finetune(self, train_loader, test_loader, epochs=100, lr=0.0001, patience=10, evaluate_every=1, visualize_every=1, 
+    def finetune(self, train_loader, test_loader, epochs=100, lr=0.001, patience=10, evaluate_every=1, visualize_every=1, 
                  checkpoint_path='checkpoints', resume_from=None):
         
         # Setup for finetuning
         os.makedirs(checkpoint_path, exist_ok=True)
         
         self.student.train()
-        optimizer = torch.optim.Adam(self.student.parameters(), lr=lr)
+        
+        # Group parameters for weight decay
+        decay = []
+        no_decay = []
+        
+        for name, param in self.student.named_parameters():
+            if 'bias' in name or 'norm' in name or 'pos_embed' in name:
+                no_decay.append(param)
+            else:
+                decay.append(param)
+        
+        # Configure optimizer with weight decay
+        optimizer = torch.optim.AdamW([
+            {'params': decay, 'weight_decay': 0.03},
+            {'params': no_decay, 'weight_decay': 0.0}
+        ], lr=lr, betas=(0.9, 0.999))
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-        criterion = torch.nn.CrossEntropyLoss()
+        criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
         
         start_epoch = 0
         best_acc = 0
@@ -260,6 +275,7 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
 
             # Training
             self.student.train()
+            scaler = torch.amp.GradScaler('cuda')
             total_loss = 0
             correct = 0
             total = 0
@@ -271,10 +287,12 @@ class DINOTrainer(torch.nn.Module, SemiSupervisedTrainer):
                 images, labels = images.to(self.device), labels.to(self.device)
                 
                 optimizer.zero_grad()
-                logits = self.student(images)[0]  # Get classification output
-                loss = criterion(logits, labels)
-                loss.backward()
-                optimizer.step()
+                with torch.amp.autocast('cuda'):
+                    logits = self.student(images)[0]  # Get classification output
+                    loss = criterion(logits, labels)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 
                 total_loss += loss.item()
                 _, predicted = logits.max(1)
